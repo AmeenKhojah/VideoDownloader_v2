@@ -1,0 +1,9 @@
+# nixpacks.toml
+
+# Phase to install system packages
+[phases.setup]
+# List packages needed from the Nix package manager
+# 'pkgs.ffmpeg-full' usually provides a comprehensive ffmpeg build
+nixPkgs = ["pkgs.ffmpeg-full"]
+
+# REMOVE the [phases.install] section - let Nixpacks handle Python deps automatically
