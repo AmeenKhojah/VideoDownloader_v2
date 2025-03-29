@@ -108,8 +108,6 @@ def generate_file_chunks_and_cleanup(file_path, cleanup_pattern, chunk_size=8192
             logger.info(f"Generator: Opened {file_path} for reading.")
             while True:
                  chunk = f.read(chunk_size)
-                 # Yield chunk must happen *before* checking if it's empty
-                 # An empty chunk signifies EOF.
                  if not chunk:
                      logger.info(f"Generator: Reached EOF for {file_path}.")
                      break
@@ -151,55 +149,34 @@ def handle_download():
         try: height = int(quality.replace('p', ''))
         except ValueError: logger.error(f"Invalid quality format received: {quality}"); _cleanup_temp_files(temp_filepath_pattern_for_delete); return "Invalid quality format.", 400
 
-        # --- !!! UPDATED FORMAT SELECTOR FOR MOBILE COMPATIBILITY !!! ---
-        # Prioritize H.264 (avc) video and AAC audio in MP4/M4A containers
-        # Use vcodec^=avc means "starts with avc" (e.g. avc1.xxxxx)
-        # Use acodec^=aac means "starts with aac" (less common, mp4a is often used for AAC in MP4)
-        # Adjusted to prefer mp4a for audio in mp4/m4a containers.
+        # --- !!! CORRECTED FORMAT SELECTOR FOR MOBILE COMPATIBILITY !!! ---
         format_selector = (
-            # Most compatible: H264 video in MP4 + AAC audio in M4A (yt-dlp merges this well into final MP4)
             f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a][ext=m4a]/'
-            # H264 video in MP4 + AAC audio (any container extension)
             f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a]/'
-            # H264 video (any ext) + AAC audio (any ext) - relies more on ffmpeg merge/convert
             f'bestvideo[height<={height}][vcodec^=avc]+bestaudio[acodec=mp4a]/'
-            # Fallback: Best MP4 video + Best M4A audio (likely AAC)
             f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/'
-            # Fallback: Best H264 video + best audio overall
             f'bestvideo[height<={height}][vcodec^=avc]+bestaudio/'
-            # Fallback: Best MP4 video + best audio overall
             f'bestvideo[height<={height}][ext=mp4]+bestaudio/'
-            # General Fallback: Best video + best audio (might be VP9/Opus etc.)
             f'bestvideo[height<={height}]+bestaudio/'
-            # Single file fallbacks (less likely needed for YouTube > 720p)
-            f'best[height<={height}][ext=mp4]/' # Best combined MP4 up to height
-            f'best[height<={height}]/'          # Best combined any format up to height
-            f'best'                             # Overall best single file
+            f'best[height<={height}][ext=mp4]/'
+            f'best[height<={height}]/'
+            f'best'
         )
         preferred_ext = 'mp4' # We always want the final output to be mp4
         temp_filepath_pattern_ydl = os.path.join(TEMP_FOLDER, f'{temp_id}.%(ext)s')
 
-        # --- !!! UPDATED ydl_opts with postprocessor_args for compatibility !!! ---
+        # --- !!! CORRECTED ydl_opts with postprocessor_args for compatibility !!! ---
         ydl_opts = {
             'format': format_selector,
             'outtmpl': temp_filepath_pattern_ydl,
             'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 3,
             'merge_output_format': 'mp4', # Explicitly merge to mp4
-            # Removed postprocessors list as args handle needed flags
-            # 'postprocessors': [], # Can be empty or removed if only using args
-             # Pass arguments directly to FFmpeg during merge/conversion
              'postprocessor_args': {
-                 # Use the 'after_move' key so args apply *after* merging/conversion to the target format
+                 # Use the 'after_move' key so args apply *after* merging/conversion
                  'after_move': [
                      '-movflags', '+faststart', # Move metadata atom to beginning
                      '-pix_fmt', 'yuv420p',      # Ensure compatible pixel format
                  ]
-                 # We avoid forcing re-encoding unless absolutely necessary:
-                 # '-c:a', 'aac',        # Force AAC audio (use if selection fails)
-                 # '-b:a', '128k',       # Example audio bitrate if forcing
-                 # '-c:v', 'libx264',    # Force H.264 video (slow!)
-                 # '-preset','fast',     # If forcing vcodec (speed vs size)
-                 # '-crf', '22'          # If forcing vcodec (quality vs size)
              }
         }
 
@@ -213,9 +190,7 @@ def handle_download():
         final_temp_filepath = downloaded_files[0]
         actual_filename, actual_extension = os.path.splitext(os.path.basename(final_temp_filepath))
         actual_extension = actual_extension.lstrip('.')
-        # Ensure the final extension reflects the container we aimed for
-        if actual_extension.lower() != preferred_ext:
-             logger.warning(f"Final file extension '{actual_extension}' differs from preferred '{preferred_ext}'. Mimetype/Filename based on actual.")
+        if actual_extension.lower() != preferred_ext: logger.warning(f"Final file extension '{actual_extension}' differs from preferred '{preferred_ext}'.")
 
         logger.info(f"Download ({temp_id}) complete. Found file: {final_temp_filepath}")
 
@@ -236,9 +211,7 @@ def handle_download():
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError during download ({temp_id}): {e}")
         err_str = str(e).lower(); user_message = f"Download failed: {e}"
-        # Check for specific FFmpeg errors within the DownloadError
-        if 'ffmpeg' in err_str or 'postprocessor' in err_str:
-             user_message = "Download failed: FFmpeg processing error during merge/conversion."
+        if 'ffmpeg' in err_str or 'postprocessor' in err_str: user_message = "Download failed: FFmpeg processing error."
         elif "urlopen error" in err_str or "timed out" in err_str: user_message = "Download failed: Network error/timeout."
         logger.info(f"Cleaning up ({temp_id}) after download error."); _cleanup_temp_files(temp_filepath_pattern_for_delete)
         return user_message, 500
