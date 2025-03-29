@@ -23,12 +23,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code into the container
 COPY . .
 
-# Create a startup script
-RUN echo '#!/bin/bash\n\
-PORT=${PORT:-5000}\n\
-echo "Starting server on port $PORT"\n\
-exec gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3' > /app/start.sh && \
-    chmod +x /app/start.sh
-
-# Run the startup script
-CMD ["/app/start.sh"]
+# Use a hardcoded port
+CMD ["python", "app.py"]
