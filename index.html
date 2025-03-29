@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Downloader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"> <!-- Font Awesome for Icons -->
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Video Downloader</h1>
+            <p>Download videos from YouTube, TikTok, Instagram, and more!</p>
+        </header>
+
+        <main>
+            <div class="input-area">
+                <input type="url" id="url-input" placeholder="Paste video link here..." required>
+                <button id="fetch-button" aria-label="Fetch Video Info">
+                    <i class="fas fa-search"></i> Fetch
+                </button>
+            </div>
+
+            <div id="loading-indicator" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Fetching video details...</p>
+            </div>
+
+            <div id="error-message" class="error" style="display: none;"></div>
+
+            <div id="results-area" class="results" style="display: none;">
+                <div class="thumbnail-container">
+                     <img id="thumbnail-img" src="#" alt="Video Thumbnail">
+                </div>
+                <h2 id="video-title">Video Title</h2>
+                 <div class="download-controls">
+                    <select id="quality-select" aria-label="Select video quality"></select>
+                    <button id="download-button" aria-label="Download Selected Quality">
+                        <i class="fas fa-download"></i> Download
+                    </button>
+                 </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Note: Downloading copyrighted material may be illegal in your country. Use responsibly.</p>
+             <p>Requires FFmpeg on the server for audio merging.</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
