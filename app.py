@@ -19,7 +19,7 @@ if not os.path.exists(TEMP_FOLDER):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Helper Functions ---
+# --- Helper Functions --- (Keep get_clean_filename, fetch_video_info, _cleanup_temp_files, generate_file_chunks_and_cleanup as they are from the previous 'Conditional Conversion + Structure Fix' version)
 
 def get_clean_filename(title, quality, extension):
     """Creates a filename safe for HTTP headers and filesystems, preserving more characters."""
@@ -65,7 +65,12 @@ def fetch_video_info(url):
              else: return None, "No compatible video formats found."
         sorted_heights = sorted(list(available_heights), reverse=True)
         quality_options = {f"{h}p": h for h in sorted_heights}
-        return {'title': title, 'thumbnail_url': proxy_thumbnail_url, 'quality_options': quality_options, 'webpage_url': webpage_url}, None
+        # Also return extractor key for conditional processing later
+        extractor_key = info_dict.get('extractor_key', 'Generic')
+        logger.info(f"Extractor key for {url}: {extractor_key}")
+        return {'title': title, 'thumbnail_url': proxy_thumbnail_url,
+                'quality_options': quality_options, 'webpage_url': webpage_url,
+                'extractor': extractor_key}, None # Add extractor key
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError fetching info for {url}: {e}")
         error_msg = f"Could not process link: {e}"
@@ -155,10 +160,12 @@ def thumbnail_proxy():
 
 @app.route('/download', methods=['GET'])
 def handle_download():
-    """Handles video download, using conditional conversion + structural fixes."""
+    """Handles video download, using platform-specific post-processing."""
     url = request.args.get('url')
     quality = request.args.get('quality')
     title = request.args.get('title', 'video')
+    # Get extractor passed from frontend (if available) or fetch it
+    extractor = request.args.get('extractor', 'Generic') # Get extractor from query params
 
     if not url or not quality: logger.warning("Download request missing URL/quality."); return "Missing URL or quality parameter.", 400
 
@@ -166,45 +173,75 @@ def handle_download():
     temp_filepath_pattern_for_delete = os.path.join(TEMP_FOLDER, f'{temp_id}.*')
     final_temp_filepath = None
 
+    # --- Get Extractor Key if not provided ---
+    # This adds overhead but is necessary for conditional logic if not passed from JS
+    if extractor == 'Generic':
+        try:
+            logger.info(f"Extractor not passed from JS, fetching again for ({temp_id}) URL: {url}")
+            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'skip_download': True, 'forcejson': True, 'socket_timeout': 10}) as ydl_check:
+                 info_dict_check = ydl_check.extract_info(url, download=False)
+                 extractor = info_dict_check.get('extractor_key', 'Generic')
+                 logger.info(f"Determined extractor key: {extractor}")
+        except Exception as e:
+            logger.warning(f"Could not determine extractor key for {url}: {e}. Using default processing.")
+            extractor = 'Generic' # Fallback
+
+
     try:
         try: height = int(quality.replace('p', ''))
         except ValueError: logger.error(f"Invalid quality: {quality}"); _cleanup_temp_files(temp_filepath_pattern_for_delete); return "Invalid quality format.", 400
 
-        # Use a relatively simple format selector, let postprocessing handle compatibility
+        # Base format selector
         format_selector = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]/best'
         preferred_ext = 'mp4'
         temp_filepath_pattern_ydl = os.path.join(TEMP_FOLDER, f'{temp_id}.%(ext)s')
 
-        # --- !!! ydl_opts: Use FFmpegVideoConvertor + postprocessor_args for structure !!! ---
+        # --- Define Base ydl_opts ---
         ydl_opts = {
             'format': format_selector,
             'outtmpl': temp_filepath_pattern_ydl,
             'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 3,
-            'postprocessors': [{
-                 # Use the dedicated convertor. It should remux if codecs are compatible with MP4,
-                 # otherwise it will convert using FFmpeg's defaults (likely H.264/AAC for MP4).
-                 'key': 'FFmpegVideoConvertor',
-                 'preferedformat': 'mp4',
-            }],
-            # Apply structural fixes AFTER the convertor has produced the final MP4
-             'postprocessor_args': {
-                 'after_move': [
-                     '-movflags', '+faststart',
-                     '-pix_fmt', 'yuv420p',
-                 ]
-             },
-            # merge_output_format might be redundant but doesn't hurt
             'merge_output_format': 'mp4',
             'progress_hooks': [lambda d: logger.debug(f"yt-dlp hook ({temp_id}): {d['status']}")],
             'postprocessor_hooks': [lambda d: logger.debug(f"yt-dlp pp-hook ({temp_id}): {d['status']}")],
+            # Start with empty postprocessor lists/dicts
+            'postprocessors': [],
+            'postprocessor_args': {},
         }
-        # --- End of ydl_opts update ---
+
+        # --- Conditional Post-Processing ---
+        # Check if extractor suggests mobile incompatibility (adjust list as needed)
+        # Common keys: 'Youtube', 'TikTok', 'Instagram', 'Facebook', 'Twitter' etc.
+        # Case-insensitive comparison is safer
+        if extractor.lower() not in ['youtube', 'youtubetab']: # Apply stricter encoding for non-YouTube
+            logger.info(f"Applying mobile compatibility re-encoding for extractor: {extractor}")
+            ydl_opts['postprocessor_args'] = {
+                 'default': [ # Force re-encoding with baseline profile
+                     '-c:v', 'libx264', '-profile:v', 'baseline', '-level', '3.1',
+                     '-crf', '23', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+                     '-c:a', 'aac', '-b:a', '128k',
+                     '-movflags', '+faststart',
+                 ]
+            }
+            log_mode = "FORCE MOBILE RE-ENCODE MODE"
+        else: # Use less aggressive structural fixes for YouTube (and others assumed compatible)
+             logger.info(f"Applying standard structural fixes for extractor: {extractor}")
+             ydl_opts['postprocessor_args'] = {
+                 'after_move': [ # Apply after merge/remux
+                     '-movflags', '+faststart',
+                     '-pix_fmt', 'yuv420p', # This might still trigger minor conversion if needed
+                 ]
+             }
+             # Optionally add FFmpegVideoConvertor ONLY if you want to ensure container is MP4
+             # even if codecs were compatible (belt-and-suspenders)
+             # ydl_opts['postprocessors'].append({'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'})
+             log_mode = "Optimizing MP4 Structure"
 
 
-        logger.info(f"Starting download ({temp_id}) URL: {url}, Q: {quality} [Conditional Conversion + Structure Fix]")
+        logger.info(f"Starting download ({temp_id}) URL: {url}, Q: {quality} [{log_mode}]")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([url])
 
-        # Look for the final .mp4 file
+        # --- File Handling & Streaming (Same as before) ---
         final_mp4_path = os.path.join(TEMP_FOLDER, f'{temp_id}.{preferred_ext}')
         if not os.path.exists(final_mp4_path):
             other_files = glob.glob(os.path.join(TEMP_FOLDER, f'{temp_id}.*'))
@@ -213,8 +250,8 @@ def handle_download():
         else: final_temp_filepath = final_mp4_path
 
         actual_filename, actual_extension = os.path.splitext(os.path.basename(final_temp_filepath)); actual_extension = actual_extension.lstrip('.')
-        output_extension = preferred_ext # Expect MP4 because of convertor
-        if actual_extension.lower() != preferred_ext: logger.warning(f"Final file extension '{actual_extension}' differs from expected '{preferred_ext}'.")
+        output_extension = preferred_ext
+        if actual_extension.lower() != preferred_ext: logger.warning(f"Final ext '{actual_extension}' differs from expected '{preferred_ext}'.")
 
         logger.info(f"Download/Process ({temp_id}) complete. Found: {final_temp_filepath}")
 
@@ -233,7 +270,7 @@ def handle_download():
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError during download ({temp_id}): {e}")
         err_str = str(e).lower(); user_message = f"Download failed: {e}"
-        if 'ffmpeg' in err_str or 'postprocessor' in err_str or 'Conversion failed' in str(e): user_message = "Download failed: Error during FFmpeg processing."
+        if 'ffmpeg' in err_str or 'postprocessor' in err_str or 'Conversion failed' in str(e) or 'encoder' in err_str: user_message = "Download failed: Error during FFmpeg processing/encoding."
         elif "urlopen error" in err_str or "timed out" in err_str: user_message = "Download failed: Network error/timeout."
         logger.info(f"Cleaning up ({temp_id}) after download error."); _cleanup_temp_files(temp_filepath_pattern_for_delete)
         return user_message, 500
