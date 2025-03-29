@@ -128,7 +128,7 @@ def handle_fetch_info():
 
 @app.route('/download', methods=['GET'])
 def handle_download():
-    """Handles the video download request ensuring mobile compatibility by forcing re-encode."""
+    """Handles the video download request optimizing MP4 structure for compatibility."""
     url = request.args.get('url')
     quality = request.args.get('quality')
     title = request.args.get('title', 'video')
@@ -143,7 +143,7 @@ def handle_download():
         try: height = int(quality.replace('p', ''))
         except ValueError: logger.error(f"Invalid quality format received: {quality}"); _cleanup_temp_files(temp_filepath_pattern_for_delete); return "Invalid quality format.", 400
 
-        # Format selector still useful to get best source for re-encoding
+        # --- Format selector prioritizing H.264/AAC remains ---
         format_selector = (
             f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a][ext=m4a]/'
             f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a]/'
@@ -159,31 +159,27 @@ def handle_download():
         preferred_ext = 'mp4'
         temp_filepath_pattern_ydl = os.path.join(TEMP_FOLDER, f'{temp_id}.%(ext)s')
 
-        # --- !!! UPDATED ydl_opts: FORCING RE-ENCODING !!! ---
-        # WARNING: This is CPU-intensive and will make processing take much longer!
+        # --- !!! UPDATED ydl_opts: REMOVED 강제 RE-ENCODING, KEEP COMPATIBILITY FIXES !!! ---
         ydl_opts = {
             'format': format_selector,
             'outtmpl': temp_filepath_pattern_ydl,
             'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 3,
             'merge_output_format': 'mp4', # Ensure final container is mp4
              'postprocessor_args': {
-                 # Apply directly to the merged/converted output:
-                 'default': [
-                     '-c:v', 'libx264',      # Force video codec to H.264
-                     '-preset', 'fast',     # Encoding speed preset (adjust as needed)
-                     '-crf', '23',          # Quality factor (adjust as needed)
-                     '-pix_fmt', 'yuv420p',  # Ensure compatible pixel format
-                     '-c:a', 'aac',          # Force audio codec to AAC
-                     '-b:a', '128k',         # Audio bitrate
-                     '-movflags', '+faststart', # Web optimized
+                 # Apply these arguments AFTER merging into the MP4 container
+                 'after_move': [
+                     '-movflags', '+faststart', # Move metadata atom to beginning (web/mobile optimized)
+                     '-pix_fmt', 'yuv420p',      # Ensure standard pixel format if conversion happens
                  ]
+                 # NO 강제 '-c:v', '-c:a' etc. - rely on selected streams
              }
         }
         # --- End of ydl_opts update ---
 
-        logger.info(f"Starting download ({temp_id}) for URL: {url}, Quality: {quality} [FORCE RE-ENCODE MODE]")
+        logger.info(f"Starting download ({temp_id}) for URL: {url}, Quality: {quality} [Optimizing MP4 Structure]") # Log mode change
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([url])
 
+        # File finding logic remains the same
         downloaded_files = glob.glob(os.path.join(TEMP_FOLDER, f'{temp_id}.*'))
         if not downloaded_files: logger.error(f"Download finished ({temp_id}) but output file not found."); raise FileNotFoundError("Downloaded file could not be located on server.")
 
@@ -210,7 +206,8 @@ def handle_download():
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError during download ({temp_id}): {e}")
         err_str = str(e).lower(); user_message = f"Download failed: {e}"
-        if 'ffmpeg' in err_str or 'postprocessor' in err_str: user_message = "Download failed: FFmpeg processing error."
+        # Check for specific FFmpeg errors within the DownloadError
+        if 'ffmpeg' in err_str or 'postprocessor' in err_str: user_message = "Download failed: FFmpeg processing error." # More specific
         elif "urlopen error" in err_str or "timed out" in err_str: user_message = "Download failed: Network error/timeout."
         logger.info(f"Cleaning up ({temp_id}) after download error."); _cleanup_temp_files(temp_filepath_pattern_for_delete)
         return user_message, 500
