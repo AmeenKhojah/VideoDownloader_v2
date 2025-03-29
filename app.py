@@ -26,9 +26,9 @@ def get_clean_filename(title, quality, extension):
     forbidden_chars = r'<>:"/\|?*'
     temp_title = "".join(c if c not in forbidden_chars else '_' for c in title)
     temp_title = temp_title.strip().strip('._')
-    temp_title = '-'.join(temp_title.split()) # Consolidate whitespace to single dash
+    temp_title = '-'.join(temp_title.split())
     safe_title = temp_title or "video"
-    safe_title = safe_title[:100] # Limit length
+    safe_title = safe_title[:100]
     return f"{safe_title}-{quality}.{extension}"
 
 def fetch_video_info(url):
@@ -48,11 +48,9 @@ def fetch_video_info(url):
         available_heights = set()
         for f in formats:
             height = f.get('height')
-            # Ensure it's a video format with a valid height
             if height and isinstance(height, int) and f.get('vcodec', 'none') != 'none':
                 available_heights.add(height)
         if not available_heights:
-             # Check for audio-only
              if any(f.get('vcodec', 'none') == 'none' and f.get('acodec', 'none') != 'none' for f in formats):
                  logger.warning(f"No video resolutions found, potentially audio-only: {url}")
                  return None, "No video resolutions found (might be audio-only)."
@@ -78,16 +76,14 @@ def _cleanup_temp_files(file_pattern):
     """Safely removes files matching a pattern, with retries."""
     try:
         logger.info(f"Attempting cleanup initiated for pattern: {file_pattern}")
-        time.sleep(0.1) # Short delay before starting
+        time.sleep(0.1)
         found_files = glob.glob(file_pattern)
         if not found_files: logger.info(f"Cleanup: No files found matching pattern {file_pattern}"); return
-
         for f_path in found_files:
             max_retries = 3; retry_delay = 0.3
             for attempt in range(max_retries):
                 try:
-                    if os.path.exists(f_path):
-                         os.remove(f_path); logger.info(f"Successfully deleted temp file {f_path} (attempt {attempt + 1})."); break
+                    if os.path.exists(f_path): os.remove(f_path); logger.info(f"Successfully deleted temp file {f_path} (attempt {attempt + 1})."); break
                     else: logger.info(f"Cleanup: File {f_path} already gone (attempt {attempt + 1})."); break
                 except OSError as e:
                     is_lock_error = (hasattr(e, 'winerror') and e.winerror == 32) or (hasattr(e, 'errno') and e.errno in [13, 16])
@@ -108,10 +104,8 @@ def generate_file_chunks_and_cleanup(file_path, cleanup_pattern, chunk_size=8192
             logger.info(f"Generator: Opened {file_path} for reading.")
             while True:
                  chunk = f.read(chunk_size)
-                 if not chunk:
-                     logger.info(f"Generator: Reached EOF for {file_path}.")
-                     break
-                 yield chunk # Yield the actual data
+                 if not chunk: logger.info(f"Generator: Reached EOF for {file_path}."); break
+                 yield chunk
         logger.info(f"Generator: Finished yielding & closed {file_path}.")
     except Exception as e: logger.error(f"Error during chunk generation for {file_path}: {e}")
     finally:
@@ -134,7 +128,7 @@ def handle_fetch_info():
 
 @app.route('/download', methods=['GET'])
 def handle_download():
-    """Handles the video download request ensuring mobile compatibility."""
+    """Handles the video download request ensuring mobile compatibility by forcing re-encode."""
     url = request.args.get('url')
     quality = request.args.get('quality')
     title = request.args.get('title', 'video')
@@ -149,7 +143,7 @@ def handle_download():
         try: height = int(quality.replace('p', ''))
         except ValueError: logger.error(f"Invalid quality format received: {quality}"); _cleanup_temp_files(temp_filepath_pattern_for_delete); return "Invalid quality format.", 400
 
-        # --- !!! CORRECTED FORMAT SELECTOR FOR MOBILE COMPATIBILITY !!! ---
+        # Format selector still useful to get best source for re-encoding
         format_selector = (
             f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a][ext=m4a]/'
             f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a]/'
@@ -162,28 +156,34 @@ def handle_download():
             f'best[height<={height}]/'
             f'best'
         )
-        preferred_ext = 'mp4' # We always want the final output to be mp4
+        preferred_ext = 'mp4'
         temp_filepath_pattern_ydl = os.path.join(TEMP_FOLDER, f'{temp_id}.%(ext)s')
 
-        # --- !!! CORRECTED ydl_opts with postprocessor_args for compatibility !!! ---
+        # --- !!! UPDATED ydl_opts: FORCING RE-ENCODING !!! ---
+        # WARNING: This is CPU-intensive and will make processing take much longer!
         ydl_opts = {
             'format': format_selector,
             'outtmpl': temp_filepath_pattern_ydl,
             'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 3,
-            'merge_output_format': 'mp4', # Explicitly merge to mp4
+            'merge_output_format': 'mp4', # Ensure final container is mp4
              'postprocessor_args': {
-                 # Use the 'after_move' key so args apply *after* merging/conversion
-                 'after_move': [
-                     '-movflags', '+faststart', # Move metadata atom to beginning
-                     '-pix_fmt', 'yuv420p',      # Ensure compatible pixel format
+                 # Apply directly to the merged/converted output:
+                 'default': [
+                     '-c:v', 'libx264',      # Force video codec to H.264
+                     '-preset', 'fast',     # Encoding speed preset (adjust as needed)
+                     '-crf', '23',          # Quality factor (adjust as needed)
+                     '-pix_fmt', 'yuv420p',  # Ensure compatible pixel format
+                     '-c:a', 'aac',          # Force audio codec to AAC
+                     '-b:a', '128k',         # Audio bitrate
+                     '-movflags', '+faststart', # Web optimized
                  ]
              }
         }
+        # --- End of ydl_opts update ---
 
-        logger.info(f"Starting download ({temp_id}) for URL: {url}, Quality: {quality} [Mobile Compatibility Mode]")
+        logger.info(f"Starting download ({temp_id}) for URL: {url}, Quality: {quality} [FORCE RE-ENCODE MODE]")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([url])
 
-        # File finding logic remains the same
         downloaded_files = glob.glob(os.path.join(TEMP_FOLDER, f'{temp_id}.*'))
         if not downloaded_files: logger.error(f"Download finished ({temp_id}) but output file not found."); raise FileNotFoundError("Downloaded file could not be located on server.")
 
@@ -202,12 +202,11 @@ def handle_download():
         file_size = os.path.getsize(final_temp_filepath); mime_type = f'video/{actual_extension or preferred_ext}'
         headers = {'Content-Disposition': f"attachment; filename*=UTF-8''{suggested_filename_encoded}", 'Content-Length': str(file_size), 'Content-Type': mime_type}
 
-        # Streaming and cleanup call remain the same
         stream = stream_with_context(generate_file_chunks_and_cleanup(final_temp_filepath, temp_filepath_pattern_for_delete))
         logger.info(f"Preparing to stream {final_temp_filepath} as {suggested_filename_raw} ({file_size} bytes).")
         return Response(stream, headers=headers)
 
-    # --- Exception Handling (includes cleanup calls) ---
+    # --- Exception Handling ---
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError during download ({temp_id}): {e}")
         err_str = str(e).lower(); user_message = f"Download failed: {e}"
@@ -226,5 +225,4 @@ def handle_download():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"Flask app starting.")
-    # IMPORTANT: debug=False should be used for production/deployment
     app.run(debug=False, host='0.0.0.0', port=port)
