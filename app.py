@@ -5,7 +5,7 @@ import glob
 import time
 import urllib.parse
 from flask import (Flask, render_template, request, jsonify,
-                   Response, stream_with_context) # Removed after_this_request
+                   Response, stream_with_context, abort) # Added abort back
 import yt_dlp
 import requests
 
@@ -145,9 +145,7 @@ def thumbnail_proxy():
         r = requests.get(image_url, stream=True, headers=headers, timeout=timeout)
         r.raise_for_status()
         content_type = r.headers.get('Content-Type')
-        if not content_type or not content_type.lower().startswith('image/'):
-             logger.error(f"Invalid content type '{content_type}' for thumbnail proxy: {image_url}")
-             abort(400, 'URL did not point to a valid image.')
+        if not content_type or not content_type.lower().startswith('image/'): logger.error(f"Invalid content type '{content_type}' for proxy: {image_url}"); abort(400, 'URL did not point to a valid image.')
         response = Response(stream_with_context(r.iter_content(chunk_size=8192)), content_type=content_type)
         return response
     except requests.exceptions.Timeout: logger.error(f"Timeout fetching thumbnail for proxy: {image_url}"); abort(504, 'Timeout fetching thumbnail image.')
@@ -157,7 +155,7 @@ def thumbnail_proxy():
 
 @app.route('/download', methods=['GET'])
 def handle_download():
-    """Handles video download, using conditional conversion and structural fixes."""
+    """Handles video download, forcing re-encode to H.264 Baseline/AAC for compatibility."""
     url = request.args.get('url')
     quality = request.args.get('quality')
     title = request.args.get('title', 'video')
@@ -172,46 +170,42 @@ def handle_download():
         try: height = int(quality.replace('p', ''))
         except ValueError: logger.error(f"Invalid quality: {quality}"); _cleanup_temp_files(temp_filepath_pattern_for_delete); return "Invalid quality format.", 400
 
-        # --- Format Selector: Prioritize compatible, then best overall ---
-        format_selector = (
-            f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a][ext=m4a]/' # Ideal H264/AAC streams
-            f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a]/'
-            f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/' # Prefer MP4 container sources
-            f'bestvideo[height<={height}]+bestaudio/' # General best separate streams
-            f'best[height<={height}][ext=mp4]/'      # Best combined MP4 (lower quality usually)
-            f'best[height<={height}]/'              # Best combined overall
-            f'best'
-        )
+        # Simple format selector - let FFmpeg do the heavy lifting
+        format_selector = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]/best'
         preferred_ext = 'mp4'
         temp_filepath_pattern_ydl = os.path.join(TEMP_FOLDER, f'{temp_id}.%(ext)s')
 
-        # --- ydl_opts: Conditional Conversion + Structural Fixes ---
+        # --- !!! UPDATED ydl_opts: FORCE RE-ENCODE WITH SPECIFIC MOBILE PROFILE !!! ---
+        # WARNING: CPU-intensive! Targets maximum compatibility.
         ydl_opts = {
             'format': format_selector,
             'outtmpl': temp_filepath_pattern_ydl,
             'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 3,
-            'postprocessors': [{
-                 # Run FFmpeg only if direct remuxing to MP4 fails or codecs are incompatible
-                 'key': 'FFmpegVideoConvertor',
-                 'preferedformat': 'mp4', # Target MP4. FFmpeg will decide if re-encoding is needed.
-            }],
-            # Apply structural fixes AFTER the potential conversion/merge
+            'merge_output_format': 'mp4', # Merge to MP4 before final adjustments if needed
              'postprocessor_args': {
-                 'after_move': [
-                     '-movflags', '+faststart',
-                     '-pix_fmt', 'yuv420p',
+                 # Apply these FFmpeg arguments during the final output stage
+                 'default': [
+                     '-c:v', 'libx264',
+                     '-profile:v', 'baseline', # Max compatibility profile
+                     '-level', '3.1',          # Compatible level
+                     '-crf', '23',             # Quality (adjust as needed)
+                     '-preset', 'fast',        # Encoding speed (faster = larger)
+                     '-pix_fmt', 'yuv420p',     # Pixel format
+                     '-c:a', 'aac',             # Audio codec
+                     '-b:a', '128k',            # Audio bitrate
+                     '-movflags', '+faststart', # Web/Mobile optimized
                  ]
-             },
-            # Ensure intermediate merge (if needed) also aims for MP4
-            'merge_output_format': 'mp4',
-            'progress_hooks': [lambda d: logger.debug(f"yt-dlp hook ({temp_id}): {d['status']}")],
-            'postprocessor_hooks': [lambda d: logger.debug(f"yt-dlp pp-hook ({temp_id}): {d['status']}")],
+             }
+             # Removed explicit FFmpegVideoConvertor postprocessor key
+             # The presence of codec args in postprocessor_args forces conversion.
         }
+        # --- End of ydl_opts update ---
 
-        logger.info(f"Starting download ({temp_id}) URL: {url}, Q: {quality} [Conditional Conversion + Structure Fix]")
+
+        logger.info(f"Starting download ({temp_id}) URL: {url}, Q: {quality} [FORCE MOBILE RE-ENCODE MODE]")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([url])
 
-        # Look for the final .mp4 file (might have been converted or just merged)
+        # Look for the final .mp4 file, as conversion should result in .mp4
         final_mp4_path = os.path.join(TEMP_FOLDER, f'{temp_id}.{preferred_ext}')
         if not os.path.exists(final_mp4_path):
             other_files = glob.glob(os.path.join(TEMP_FOLDER, f'{temp_id}.*'))
@@ -219,11 +213,12 @@ def handle_download():
             else: logger.error(f"Output MP4 file not found: {final_mp4_path}"); raise FileNotFoundError("Final MP4 file not found.")
         else: final_temp_filepath = final_mp4_path
 
+
         actual_filename, actual_extension = os.path.splitext(os.path.basename(final_temp_filepath)); actual_extension = actual_extension.lstrip('.')
-        output_extension = preferred_ext # Assume MP4 because of convertor/merge target
+        output_extension = preferred_ext # Expect MP4 due to forced conversion
         if actual_extension.lower() != preferred_ext: logger.warning(f"Final file extension '{actual_extension}' differs from expected '{preferred_ext}'.")
 
-        logger.info(f"Download/Process ({temp_id}) complete. Found: {final_temp_filepath}")
+        logger.info(f"Download/Re-encode ({temp_id}) complete. Found: {final_temp_filepath}")
 
         suggested_filename_raw = get_clean_filename(title, quality, output_extension)
         suggested_filename_encoded = urllib.parse.quote(suggested_filename_raw)
@@ -238,9 +233,10 @@ def handle_download():
 
     # --- Exception Handling ---
     except yt_dlp.utils.DownloadError as e:
-        logger.error(f"yt-dlp DownloadError during download ({temp_id}): {e}")
+        logger.error(f"yt-dlp DownloadError during download/re-encode ({temp_id}): {e}")
         err_str = str(e).lower(); user_message = f"Download failed: {e}"
-        if 'ffmpeg' in err_str or 'postprocessor' in err_str or 'Conversion failed' in str(e): user_message = "Download failed: Error during FFmpeg processing."
+        if 'ffmpeg' in err_str or 'postprocessor' in err_str or 'Conversion failed' in str(e) or 'encoder' in err_str:
+            user_message = "Download failed: Error during FFmpeg video re-encoding." # Make message clearer
         elif "urlopen error" in err_str or "timed out" in err_str: user_message = "Download failed: Network error/timeout."
         logger.info(f"Cleaning up ({temp_id}) after download error."); _cleanup_temp_files(temp_filepath_pattern_for_delete)
         return user_message, 500
