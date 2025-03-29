@@ -26,6 +26,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Define the command to run the application using Gunicorn
-# Gunicorn will bind to 0.0.0.0 and the port specified by $PORT from Railway
-# Increased timeout for potentially long downloads
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:$PORT", "--preload", "--timeout", "180", "--workers", "3"]
+# Use the "shell" form so $PORT gets expanded by the shell
+# *** THIS IS THE CORRECTED LINE ***
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3
