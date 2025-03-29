@@ -27,4 +27,4 @@ COPY . .
 ENV PORT=5000
 
 # Use shell form with variable expansion for CMD
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT} --preload --timeout 180 --workers 3"]
+CMD gunicorn app:app --bind 0.0.0.0:${PORT:-5000} --preload --timeout 180 --workers 3
