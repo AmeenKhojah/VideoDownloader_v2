@@ -24,4 +24,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Define the command to run the application using Gunicorn
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3"]
+CMD ["sh", "-c", "echo Port is $PORT && gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3"]
+
