@@ -11,17 +11,17 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Set the working directory
+# Set the working directory in the container
 WORKDIR /app
 
-# Copy requirements first for layer caching
+# Copy the requirements file into the container
 COPY requirements.txt .
+
+# Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy the rest of the application code into the container
 COPY . .
 
-# *** TEMPORARY DEBUGGING CMD ***
-# Explicitly use shell to print the PORT variable and all env vars
-# Then sleep so we can see the logs before the container potentially exits
-CMD ["/bin/sh", "-c", "echo \"DEBUG: Checking PORT variable. Value is: [$PORT]\" && echo \"DEBUG: Listing environment variables:\" && env && echo \"DEBUG: Sleeping for 60 seconds...\" && sleep 60 && echo \"DEBUG: Exiting after sleep.\""]
+# Define the command to run the application using Gunicorn
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3"]
