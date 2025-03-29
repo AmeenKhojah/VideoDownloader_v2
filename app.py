@@ -5,9 +5,9 @@ import glob
 import time
 import urllib.parse
 from flask import (Flask, render_template, request, jsonify,
-                   Response, stream_with_context, make_response, abort) # Added make_response, abort
+                   Response, stream_with_context) # Removed after_this_request
 import yt_dlp
-import requests # requests is needed for the proxy
+import requests
 
 # --- Configuration ---
 app = Flask(__name__)
@@ -31,9 +31,8 @@ def get_clean_filename(title, quality, extension):
     safe_title = safe_title[:100]
     return f"{safe_title}-{quality}.{extension}"
 
-# !!! fetch_video_info NOW RETURNS A PROXY URL for the thumbnail !!!
 def fetch_video_info(url):
-    """Uses yt-dlp to get video metadata, constructs proxy URL for thumbnail."""
+    """Uses yt-dlp to get video metadata, including better thumbnail handling."""
     logger.info(f"Fetching info for URL: {url}")
     ydl_opts = {
         'quiet': True, 'no_warnings': True, 'skip_download': True,
@@ -42,27 +41,18 @@ def fetch_video_info(url):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info_dict = ydl.extract_info(url, download=False)
-
         title = info_dict.get('title', 'Untitled Video')
         webpage_url = info_dict.get('webpage_url', url)
-
-        # --- Thumbnail Logic ---
-        original_thumbnail_url = info_dict.get('thumbnail') # Primary check
-        if not original_thumbnail_url:
+        thumbnail_url = info_dict.get('thumbnail')
+        if not thumbnail_url:
             thumbnails_list = info_dict.get('thumbnails')
             if isinstance(thumbnails_list, list) and thumbnails_list:
-                # Try getting the URL from the last entry or first
-                original_thumbnail_url = thumbnails_list[-1].get('url') or thumbnails_list[0].get('url')
-                if original_thumbnail_url: logger.info(f"Using thumbnail from 'thumbnails' list for {url}")
-
-        proxy_thumbnail_url = None # Initialize
-        if original_thumbnail_url:
-            # Construct the URL for our proxy endpoint
-            proxy_thumbnail_url = f"/thumbnail_proxy?url={urllib.parse.quote_plus(original_thumbnail_url)}"
-            logger.info(f"Generated proxy thumbnail URL: {proxy_thumbnail_url}")
-        else:
-            logger.warning(f"Could not find a source thumbnail URL for {url}")
-        # --- End Thumbnail Logic ---
+                thumbnail_url = thumbnails_list[-1].get('url') or thumbnails_list[0].get('url')
+                if thumbnail_url: logger.info(f"Using thumbnail from 'thumbnails' list for {url}")
+        proxy_thumbnail_url = None
+        if thumbnail_url:
+            proxy_thumbnail_url = f"/thumbnail_proxy?url={urllib.parse.quote_plus(thumbnail_url)}"
+        else: logger.warning(f"Could not find a source thumbnail URL for {url}")
 
         formats = info_dict.get('formats', [])
         available_heights = set()
@@ -70,23 +60,12 @@ def fetch_video_info(url):
             height = f.get('height')
             if height and isinstance(height, int) and f.get('vcodec', 'none') != 'none':
                 available_heights.add(height)
-
         if not available_heights:
-             if any(f.get('vcodec', 'none') == 'none' and f.get('acodec', 'none') != 'none' for f in formats):
-                 return None, "No video resolutions found (might be audio-only)."
+             if any(f.get('vcodec', 'none') == 'none' and f.get('acodec', 'none') != 'none' for f in formats): return None, "No video resolutions found (might be audio-only)."
              else: return None, "No compatible video formats found."
-
         sorted_heights = sorted(list(available_heights), reverse=True)
         quality_options = {f"{h}p": h for h in sorted_heights}
-
-        # Return the PROXY URL for the thumbnail
-        return {
-            'title': title,
-            'thumbnail_url': proxy_thumbnail_url, # Send proxy URL or None
-            'quality_options': quality_options,
-            'webpage_url': webpage_url
-        }, None
-
+        return {'title': title, 'thumbnail_url': proxy_thumbnail_url, 'quality_options': quality_options, 'webpage_url': webpage_url}, None
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError fetching info for {url}: {e}")
         error_msg = f"Could not process link: {e}"
@@ -98,7 +77,6 @@ def fetch_video_info(url):
     except Exception as e:
         logger.error(f"Unexpected error fetching info for {url}: {e}", exc_info=True)
         return None, f"An unexpected server error occurred fetching info."
-
 
 def _cleanup_temp_files(file_pattern):
     """Safely removes files matching a pattern, with retries."""
@@ -150,56 +128,36 @@ def handle_fetch_info():
     """Handles AJAX request to get video info."""
     url = request.json.get('url')
     if not url: return jsonify({'error': 'URL is required.'}), 400
-    video_info, error = fetch_video_info(url) # Gets proxy URL for thumbnail
+    video_info, error = fetch_video_info(url)
     if error: status_code = 400 if "Unsupported" in error or "unavailable" in error or "valid" in error else 500; return jsonify({'error': error}), status_code
     if not video_info: return jsonify({'error': 'Could not retrieve video information.'}), 500
     return jsonify(video_info)
 
-# !!! NEW ROUTE FOR THUMBNAIL PROXY !!!
 @app.route('/thumbnail_proxy')
 def thumbnail_proxy():
     """Fetches thumbnail from original URL and streams it back."""
     image_url = request.args.get('url')
-    if not image_url:
-        abort(400, 'Missing image URL parameter.') # Use Flask's abort
-
-    # Add a common User-Agent header - some sites might require it
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    timeout = 10 # Timeout for fetching the image
-
+    if not image_url: abort(400, 'Missing image URL parameter.')
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    timeout = 10
     try:
         logger.info(f"Proxying thumbnail from: {image_url}")
         r = requests.get(image_url, stream=True, headers=headers, timeout=timeout)
-        r.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-
-        # Check content type
+        r.raise_for_status()
         content_type = r.headers.get('Content-Type')
         if not content_type or not content_type.lower().startswith('image/'):
              logger.error(f"Invalid content type '{content_type}' for thumbnail proxy: {image_url}")
              abort(400, 'URL did not point to a valid image.')
-
-        # Stream the response
         response = Response(stream_with_context(r.iter_content(chunk_size=8192)), content_type=content_type)
-        # Optional: Add caching headers if desired
-        # response.headers['Cache-Control'] = 'public, max-age=3600' # Cache for 1 hour
         return response
-
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout fetching thumbnail for proxy: {image_url}")
-        abort(504, 'Timeout fetching thumbnail image.') # Gateway Timeout
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching thumbnail for proxy: {image_url} - {e}")
-        abort(502, f'Error fetching thumbnail image: {e}') # Bad Gateway
-    except Exception as e:
-         logger.error(f"Unexpected error in thumbnail proxy for {image_url}: {e}", exc_info=True)
-         abort(500, 'Internal server error during thumbnail proxy.')
+    except requests.exceptions.Timeout: logger.error(f"Timeout fetching thumbnail for proxy: {image_url}"); abort(504, 'Timeout fetching thumbnail image.')
+    except requests.exceptions.RequestException as e: logger.error(f"Error fetching thumbnail for proxy: {image_url} - {e}"); abort(502, f'Error fetching thumbnail image: {e}')
+    except Exception as e: logger.error(f"Unexpected error in thumbnail proxy for {image_url}: {e}", exc_info=True); abort(500, 'Internal server error during thumbnail proxy.')
 
 
 @app.route('/download', methods=['GET'])
 def handle_download():
-    """Handles the video download request, using FFmpeg conversion for compatibility."""
+    """Handles video download, using conditional conversion and structural fixes."""
     url = request.args.get('url')
     quality = request.args.get('quality')
     title = request.args.get('title', 'video')
@@ -214,44 +172,65 @@ def handle_download():
         try: height = int(quality.replace('p', ''))
         except ValueError: logger.error(f"Invalid quality: {quality}"); _cleanup_temp_files(temp_filepath_pattern_for_delete); return "Invalid quality format.", 400
 
-        # Use simplified format selector, rely on FFmpeg convertor
-        format_selector = f'bestvideo[height<={height}]+bestaudio/best[height<={height}]/best'
+        # --- Format Selector: Prioritize compatible, then best overall ---
+        format_selector = (
+            f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a][ext=m4a]/' # Ideal H264/AAC streams
+            f'bestvideo[height<={height}][vcodec^=avc][ext=mp4]+bestaudio[acodec=mp4a]/'
+            f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/' # Prefer MP4 container sources
+            f'bestvideo[height<={height}]+bestaudio/' # General best separate streams
+            f'best[height<={height}][ext=mp4]/'      # Best combined MP4 (lower quality usually)
+            f'best[height<={height}]/'              # Best combined overall
+            f'best'
+        )
         preferred_ext = 'mp4'
         temp_filepath_pattern_ydl = os.path.join(TEMP_FOLDER, f'{temp_id}.%(ext)s')
 
-        # Use FFmpegVideoConvertor postprocessor
+        # --- ydl_opts: Conditional Conversion + Structural Fixes ---
         ydl_opts = {
-            'format': format_selector, 'outtmpl': temp_filepath_pattern_ydl,
+            'format': format_selector,
+            'outtmpl': temp_filepath_pattern_ydl,
             'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 3,
             'postprocessors': [{
+                 # Run FFmpeg only if direct remuxing to MP4 fails or codecs are incompatible
                  'key': 'FFmpegVideoConvertor',
-                 'preferedformat': 'mp4', # Convert to MP4 with default compatible codecs (should be H264/AAC)
+                 'preferedformat': 'mp4', # Target MP4. FFmpeg will decide if re-encoding is needed.
             }],
-            'merge_output_format': 'mp4', # Ensure merge before convert is also mp4 if possible
+            # Apply structural fixes AFTER the potential conversion/merge
+             'postprocessor_args': {
+                 'after_move': [
+                     '-movflags', '+faststart',
+                     '-pix_fmt', 'yuv420p',
+                 ]
+             },
+            # Ensure intermediate merge (if needed) also aims for MP4
+            'merge_output_format': 'mp4',
             'progress_hooks': [lambda d: logger.debug(f"yt-dlp hook ({temp_id}): {d['status']}")],
             'postprocessor_hooks': [lambda d: logger.debug(f"yt-dlp pp-hook ({temp_id}): {d['status']}")],
         }
 
-        logger.info(f"Starting download ({temp_id}) URL: {url}, Q: {quality} [Explicit MP4 Conversion Mode]")
+        logger.info(f"Starting download ({temp_id}) URL: {url}, Q: {quality} [Conditional Conversion + Structure Fix]")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([url])
 
-        # Look for the final .mp4 file created by the convertor
+        # Look for the final .mp4 file (might have been converted or just merged)
         final_mp4_path = os.path.join(TEMP_FOLDER, f'{temp_id}.{preferred_ext}')
         if not os.path.exists(final_mp4_path):
             other_files = glob.glob(os.path.join(TEMP_FOLDER, f'{temp_id}.*'))
             if other_files: logger.warning(f"Final MP4 not found, using first other file: {other_files[0]}"); final_temp_filepath = other_files[0]
-            else: logger.error(f"Output MP4 file not found: {final_mp4_path}"); raise FileNotFoundError("Converted MP4 file not found.")
+            else: logger.error(f"Output MP4 file not found: {final_mp4_path}"); raise FileNotFoundError("Final MP4 file not found.")
         else: final_temp_filepath = final_mp4_path
 
         actual_filename, actual_extension = os.path.splitext(os.path.basename(final_temp_filepath)); actual_extension = actual_extension.lstrip('.')
-        logger.info(f"Download/Conversion ({temp_id}) complete. Found: {final_temp_filepath}")
+        output_extension = preferred_ext # Assume MP4 because of convertor/merge target
+        if actual_extension.lower() != preferred_ext: logger.warning(f"Final file extension '{actual_extension}' differs from expected '{preferred_ext}'.")
 
-        suggested_filename_raw = get_clean_filename(title, quality, preferred_ext)
+        logger.info(f"Download/Process ({temp_id}) complete. Found: {final_temp_filepath}")
+
+        suggested_filename_raw = get_clean_filename(title, quality, output_extension)
         suggested_filename_encoded = urllib.parse.quote(suggested_filename_raw)
 
         if not os.path.exists(final_temp_filepath): logger.error(f"File {final_temp_filepath} gone before streaming."); raise FileNotFoundError("File disappeared before streaming.")
 
-        file_size = os.path.getsize(final_temp_filepath); mime_type = f'video/{preferred_ext}'
+        file_size = os.path.getsize(final_temp_filepath); mime_type = f'video/{output_extension}'
         headers = {'Content-Disposition': f"attachment; filename*=UTF-8''{suggested_filename_encoded}", 'Content-Length': str(file_size), 'Content-Type': mime_type}
         stream = stream_with_context(generate_file_chunks_and_cleanup(final_temp_filepath, temp_filepath_pattern_for_delete))
         logger.info(f"Streaming {final_temp_filepath} as {suggested_filename_raw} ({file_size} bytes).")
@@ -261,7 +240,7 @@ def handle_download():
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp DownloadError during download ({temp_id}): {e}")
         err_str = str(e).lower(); user_message = f"Download failed: {e}"
-        if 'ffmpeg' in err_str or 'postprocessor' in err_str or 'Conversion failed' in str(e): user_message = "Download failed: Error during FFmpeg video conversion."
+        if 'ffmpeg' in err_str or 'postprocessor' in err_str or 'Conversion failed' in str(e): user_message = "Download failed: Error during FFmpeg processing."
         elif "urlopen error" in err_str or "timed out" in err_str: user_message = "Download failed: Network error/timeout."
         logger.info(f"Cleaning up ({temp_id}) after download error."); _cleanup_temp_files(temp_filepath_pattern_for_delete)
         return user_message, 500
