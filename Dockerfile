@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
-# Define the command to run the application using Gunicorn
-# Use JSON form but explicitly call /bin/sh -c to ensure shell expansion of $PORT
-# *** THIS IS THE CORRECTED LINE ***
-CMD ["/bin/sh", "-c", "gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3"]
+# *** TEMPORARY DEBUGGING CMD ***
+# Explicitly use shell to print the PORT variable and all env vars
+# Then sleep so we can see the logs before the container potentially exits
+CMD ["/bin/sh", "-c", "echo \"DEBUG: Checking PORT variable. Value is: [$PORT]\" && echo \"DEBUG: Listing environment variables:\" && env && echo \"DEBUG: Sleeping for 60 seconds...\" && sleep 60 && echo \"DEBUG: Exiting after sleep.\""]
