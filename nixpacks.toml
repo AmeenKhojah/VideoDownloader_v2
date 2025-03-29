@@ -1,9 +1,12 @@
 # nixpacks.toml
 
-# Phase to install system packages
+# Phase to install system packages AND ensure specific Python version
 [phases.setup]
 # List packages needed from the Nix package manager
-# 'pkgs.ffmpeg-full' usually provides a comprehensive ffmpeg build
-nixPkgs = ["pkgs.ffmpeg-full"]
+nixPkgs = [
+    "pkgs.python310", # Explicitly request Python 3.10 (match your Dockerfile)
+    "pkgs.ffmpeg-full" # Keep ffmpeg
+]
 
 # REMOVE the [phases.install] section - let Nixpacks handle Python deps automatically
+# based on the Python version specified above.
