@@ -2,8 +2,8 @@
 FROM python:3.10-slim
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies including ffmpeg
 RUN apt-get update && \
@@ -23,6 +23,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code into the container
 COPY . .
 
-# Define the command to run the application using Gunicorn
-CMD ["sh", "-c", "echo Port is $PORT && gunicorn app:app --bind 0.0.0.0:$PORT --preload --timeout 180 --workers 3"]
+# Set a default port (Railway should override this if set)
+ENV PORT=5000
 
+# Use shell form with variable expansion for CMD
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT} --preload --timeout 180 --workers 3"]
